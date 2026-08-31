@@ -50,6 +50,12 @@ powershell -ExecutionPolicy Bypass -File install_task.ps1
 
 ## 修改与问题解决日志
 
+### 2026-08-31 13:45
+- **修改/问题**：`install_task.ps1` 用 schtasks + XML 注册计划任务报"指定的队列无效"（schtasks 对事件触发器 Subscription 元素的已知缺陷）
+- **涉及文件**：`install_task.ps1`、`AnLe.md`
+- **解决方案**：改用 `Register-ScheduledTask` cmdlet，事件触发器通过 `MSFT_TaskEventTrigger` CIM 实例（`New-CimInstance -ClientOnly`）注入原始 XPath 订阅（`Microsoft-Windows-NetworkProfile/Operational` EventID=10000）；本会话已实际注册成功，验证 `Get-ScheduledTask` 显示 LogonTrigger + EventTrigger 均 Enabled，任务状态 Ready，全程无需管理员权限
+- **影响范围**：部署方式变更（schtasks XML → Register-ScheduledTask）；`-Remove` 改用 `Unregister-ScheduledTask`；自动化部署链路闭环
+
 ### 2026-08-31 13:39
 - **修改/问题**：真实离线场景首跑失败（CAS 登录返回 HTTP 500），且 `confirm_online()` 调用传入不存在的 `timeout` 参数导致 TypeError
 - **涉及文件**：`login.py`
