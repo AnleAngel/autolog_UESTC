@@ -50,6 +50,12 @@ powershell -ExecutionPolicy Bypass -File install_task.ps1
 
 ## 修改与问题解决日志
 
+### 2026-08-31 13:39
+- **修改/问题**：真实离线场景首跑失败（CAS 登录返回 HTTP 500），且 `confirm_online()` 调用传入不存在的 `timeout` 参数导致 TypeError
+- **涉及文件**：`login.py`
+- **解决方案**：分析真实离线日志发现 `eportal/index.jsp` 的 302 Location 中已携带后端生成的真实 `sessionId`，原先仅从 `resolveRedirectInfo` 响应取 `flowSessionId` 且该接口在校内返回 `valid:false`，导致用了自造 ID 被 CAS 拒绝；修改为优先使用重定向链中的 `sessionId`（兼容小写 `userip/nasip` 变体），resolve 降级为诊断用途；修复 `confirm_online` 调用签名
+- **影响范围**：`do_login` 主流程；修复后经真实离线事件端到端验证：CAS 签发 ticket、回调后网络认证成功，`watch.py once` 确认"当前已在线"
+
 ### 2026-08-31 13:25
 - **修改/问题**：初始化项目：完成校园网自动登录脚本全部核心功能与文档
 - **涉及文件**：`login.py`、`watch.py`、`install_task.ps1`、`config.example.ini`、`.gitignore`、`AnLe.md`

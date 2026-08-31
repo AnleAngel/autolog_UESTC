@@ -260,9 +260,11 @@ def do_login(cfg: dict[str, Any], log) -> tuple[bool, str]:
     if gw_params:
         log.info("网关参数: %s", gw_params)
 
-    user_ip = gw_params.get("userIp")
-    nas_ip = gw_params.get("nasIp")
-    flow_session_id: Optional[str] = None
+    user_ip = gw_params.get("userIp") or gw_params.get("userip")
+    nas_ip = gw_params.get("nasIp") or gw_params.get("nasip")
+    flow_session_id: Optional[str] = gw_params.get("sessionId") or gw_params.get("flowSessionId")
+    if flow_session_id:
+        log.info("使用重定向链中的 sessionId: %s", flow_session_id)
 
     try:
         resolved = resolve_redirect(sess, server, gw_params or {}, timeout)
@@ -271,12 +273,13 @@ def do_login(cfg: dict[str, Any], log) -> tuple[bool, str]:
         if isinstance(msg, dict):
             user_ip = user_ip or msg.get("userIp")
             nas_ip = nas_ip or msg.get("nasIp")
-            text = json.dumps(msg, ensure_ascii=False)
-            m = re.search(r'"flowSessionId"\s*[:=]\s*"?([0-9a-f]{8,32})', text) or re.search(
-                r"flowSessionId=([0-9a-f]{8,32})", text
-            )
-            if msg.get("valid") and m:
-                flow_session_id = m.group(1)
+            if not flow_session_id and msg.get("valid"):
+                text = json.dumps(msg, ensure_ascii=False)
+                m = re.search(r'"flowSessionId"\s*[:=]\s*"?([0-9a-f]{8,32})', text) or re.search(
+                    r"flowSessionId=([0-9a-f]{8,32})", text
+                )
+                if m:
+                    flow_session_id = m.group(1)
     except (requests.RequestException, ValueError) as e:
         log.warning("resolveRedirectInfo 失败: %s", e)
 
@@ -308,7 +311,7 @@ def do_login(cfg: dict[str, Any], log) -> tuple[bool, str]:
     except requests.RequestException as e:
         log.warning("ticket 回调访问失败（继续确认在线状态）: %s", e)
 
-    ok, detail = confirm_online(sess, server, flow_session_id, timeout=timeout)
+    ok, detail = confirm_online(sess, server, flow_session_id)
     if ok:
         return True, f"登录成功 sessionId={flow_session_id}"
     log.error("在线确认失败: %s", json.dumps(detail, ensure_ascii=False)[:1000])
