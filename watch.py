@@ -98,9 +98,10 @@ def run_login_once(cfg: dict[str, Any]) -> tuple[bool, str]:
 
 def cmd_check(cfg: dict[str, Any]) -> int:
     sess = login.new_session()
-    online = login.is_online(sess, cfg["probe_url"], float(cfg["timeout"]))
-    logger.info("在线状态: %s", "已在线" if online else "离线")
-    return 0 if online else 1
+    state, _ = login.probe_network(sess, cfg["probe_url"], cfg["server"], float(cfg["timeout"]))
+    label = {"online": "已在线", "captive": "离线（待认证）", "down": "链路不可达"}[state]
+    logger.info("网络状态: %s", label)
+    return 0 if state == "online" else 1
 
 
 def cmd_once(cfg: dict[str, Any]) -> int:
@@ -135,13 +136,16 @@ def cmd_loop(cfg: dict[str, Any]) -> int:
     while True:
         try:
             sess = login.new_session()
-            online = login.is_online(sess, cfg["probe_url"], float(cfg["timeout"]))
-            if online:
+            state, _ = login.probe_network(sess, cfg["probe_url"], cfg["server"], float(cfg["timeout"]))
+            if state == "online":
                 if fail_count:
                     logger.info("网络已恢复")
                 fail_count = 0
+            elif state == "down":
+                logger.warning("网络链路不可达（DNS/连接失败），等待下一轮探测")
+                fail_count = 0
             else:
-                logger.info("检测到离线（连续第 %d 次），尝试登录...", fail_count + 1)
+                logger.info("检测到强制门户（离线），尝试登录...")
                 ok, msg = run_login_once(cfg)
                 logger.info("%s", msg)
                 if ok:
@@ -154,7 +158,6 @@ def cmd_loop(cfg: dict[str, Any]) -> int:
                     continue
         except Exception:
             logger.exception("循环出现未预期异常")
-            fail_count += 1
         time.sleep(interval)
 
 

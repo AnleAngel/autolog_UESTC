@@ -54,6 +54,12 @@ powershell -ExecutionPolicy Bypass -File install_task.ps1
 
 ## 修改与问题解决日志
 
+### 2026-09-01 12:52
+- **修改/问题**：从手机热点切回校园网后，未认证状态下校园 DNS 不解析外部域名，脚本的域名探测被误判为 `down` 而跳过登录，导致"只有手动在浏览器打开登录页后脚本才生效"
+- **涉及文件**：`login.py`、`watch.py`、`config.example.ini`、`config.ini`、`README.md`
+- **解决方案**：探测与登录入口全面改为 DNS 无关：① 新增纯 IP 三态探测（119.29.29.29/223.5.5.5/1.1.1.1，外网响应=在线、302 劫持到 Portal=待认证、外网不通但 Portal 可达=待认证、Portal 亦不可达=down）；② 实测发现 `eportal/index.jsp` 接受手工构造参数（本机 IP/NAS IP/MAC）并直接签发真实 `sessionId`，作为域名链路失效时的本地直连入口兜底；③ 轮询间隔默认 300→120 秒；重启看护任务加载新代码
+- **影响范围**：网络切换后无需任何手动操作，最迟约 2 分钟自动完成认证；端到端验证：纯 IP 探测、本地入口签发 sessionId、CAS 令牌获取全部通过
+
 ### 2026-09-01 12:30
 - **修改/问题**：用户经常使用 Clash 更改 DNS，开机时若残留 DNS 劫持会导致"链路级断网"（DNS 解析失败），需要在开机联网前先恢复默认 DNS
 - **涉及文件**：`reset_dns.ps1`（新增）、`install_task.ps1`、`README.md`

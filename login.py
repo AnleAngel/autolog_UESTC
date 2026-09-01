@@ -5,7 +5,9 @@ import base64
 import json
 import random
 import re
+import socket
 import time
+import uuid
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
@@ -18,6 +20,11 @@ UA = (
     "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 )
 PROBE_FALLBACK = "http://www.msftconnecttest.com/connecttest.txt"
+EXTERNAL_IP_PROBES = (
+    "http://119.29.29.29/d?dn=www.bilibili.com",
+    "http://223.5.5.5/",
+    "http://1.1.1.1/",
+)
 LOGIN_PAGE_PATH = "/cas-sso/login"
 CAPTCHA_PATH = "/cas-sso/api/protected/user/findCaptchaCount"
 RESOLVE_PATH = "/eportal/json/resolveRedirectInfo/resolve"
@@ -52,20 +59,89 @@ def resp_text(r: requests.Response) -> str:
         return raw.decode("gbk", "replace")
 
 
-def is_online(sess: requests.Session, probe_url: str, timeout: float = 8.0) -> bool:
+def get_local_ip(server: str) -> Optional[str]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        r = sess.get(probe_url, allow_redirects=False, timeout=timeout)
-    except requests.RequestException:
+        s.connect((server, 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def get_mac() -> str:
+    node = uuid.getnode()
+    return "-".join(f"{(node >> i) & 0xFF:02x}" for i in range(40, -1, -8))
+
+
+def local_entry_url(server: str, nas_ip: Optional[str]) -> str:
+    q = urlencode(
+        [
+            ("userip", get_local_ip(server) or ""),
+            ("wlanacname", ""),
+            ("nasip", nas_ip or ""),
+            ("wlanparameter", get_mac()),
+            ("url", "http://119.29.29.29/"),
+            ("userlocation", ""),
+        ]
+    )
+    return f"http://{server}/eportal/index.jsp?{q}"
+
+
+def _is_portal_redirect(location: str, portal_host: str) -> bool:
+    if not location:
         return False
-    if 300 <= r.status_code < 400:
-        return False
-    if r.status_code == 204:
-        return True
-    try:
-        r2 = sess.get(PROBE_FALLBACK, allow_redirects=False, timeout=timeout)
-    except requests.RequestException:
-        return False
-    return r2.status_code == 200 and "Microsoft Connect Test" in resp_text(r2)
+    low = location.lower()
+    return bool(
+        (portal_host and portal_host in low) or "eportal" in low or "portal-main" in low or "/portal/" in low
+    )
+
+
+def probe_network(
+    sess: requests.Session, probe_url: str, portal_host: str = "", timeout: float = 8.0
+) -> tuple[str, list[str]]:
+    """Classify network state without DNS: 'online' | 'captive' | 'down'."""
+    t2 = max(4.0, min(timeout, 5.0))
+    for u in EXTERNAL_IP_PROBES:
+        try:
+            r = sess.get(u, allow_redirects=False, timeout=t2)
+        except requests.RequestException:
+            continue
+        loc = r.headers.get("Location", "")
+        if 300 <= r.status_code < 400 and _is_portal_redirect(loc, portal_host):
+            return "captive", [f"{r.status_code} {u} -> {loc}"]
+        if 300 <= r.status_code < 400:
+            return "online", [f"{r.status_code} {u} -> {loc}"]
+        return "online", [f"{r.status_code} {u}"]
+    hops = capture_redirect_chain(sess, probe_url, timeout, max_hops=1)
+    if hops and not hops[0].startswith("<error"):
+        try:
+            code = int(hops[0].split(" ", 1)[0])
+        except ValueError:
+            code = 0
+        if code == 204:
+            return "online", hops
+        if 300 <= code < 400:
+            return "captive", hops
+        try:
+            r = sess.get(PROBE_FALLBACK, allow_redirects=False, timeout=timeout)
+            if r.status_code == 200 and "Microsoft Connect Test" in resp_text(r):
+                return "online", hops
+        except requests.RequestException:
+            pass
+        return "captive", hops
+    if portal_host:
+        try:
+            r = sess.get(f"http://{portal_host}/", allow_redirects=False, timeout=timeout)
+            return "captive", [f"{r.status_code} http://{portal_host}/ (Portal 可达但外网不可达，判定为未认证)"]
+        except requests.RequestException:
+            pass
+    return "down", hops
+
+
+def is_online(sess: requests.Session, probe_url: str, timeout: float = 8.0, portal_host: str = "") -> bool:
+    return probe_network(sess, probe_url, portal_host, timeout)[0] == "online"
 
 
 def capture_redirect_chain(
@@ -240,6 +316,16 @@ def confirm_online(
 
 
 def do_login(cfg: dict[str, Any], log) -> tuple[bool, str]:
+    try:
+        return _do_login(cfg, log)
+    except requests.RequestException as e:
+        log.error("登录过程网络异常: %s", e)
+        return False, f"登录过程网络异常（{type(e).__name__}），稍后重试"
+    except LoginError as e:
+        return False, str(e)
+
+
+def _do_login(cfg: dict[str, Any], log) -> tuple[bool, str]:
     server: str = cfg["server"]
     username: str = cfg["username"]
     password: str = cfg["password"]
@@ -249,10 +335,14 @@ def do_login(cfg: dict[str, Any], log) -> tuple[bool, str]:
 
     sess = new_session()
 
-    if is_online(sess, probe_url, timeout):
+    state, _ = probe_network(sess, probe_url, server, timeout)
+    if state == "online":
         return True, "当前已在线"
+    if state == "down":
+        log.warning("网络链路不可达（Portal 亦不可达），无法登录")
+        return False, "网络链路不可达（可能网线/Wi-Fi未连接或Portal故障），稍后重试"
 
-    log.info("检测到离线，捕获网关重定向链...")
+    log.info("检测到强制门户（离线），捕获网关重定向链...")
     hops = capture_redirect_chain(sess, probe_url, timeout)
     for h in hops:
         log.info("  重定向: %s", h)
@@ -265,6 +355,22 @@ def do_login(cfg: dict[str, Any], log) -> tuple[bool, str]:
     flow_session_id: Optional[str] = gw_params.get("sessionId") or gw_params.get("flowSessionId")
     if flow_session_id:
         log.info("使用重定向链中的 sessionId: %s", flow_session_id)
+
+    if not flow_session_id:
+        log.info("域名链路不可用（未认证网络阻断 DNS），改用本地直连入口 eportal/index.jsp...")
+        entry = local_entry_url(server, nas_ip)
+        try:
+            r = sess.get(entry, allow_redirects=False, timeout=timeout)
+            loc = r.headers.get("Location", "")
+            log.info("本地入口: HTTP %s -> %s", r.status_code, loc[:160])
+            m = re.search(r"[?&]sessionId=([0-9a-f]{8,32})", loc or "")
+            if m:
+                flow_session_id = m.group(1)
+            loc_q = dict(parse_qsl(urlparse(loc).query)) if loc else {}
+            user_ip = user_ip or loc_q.get("userIp")
+            nas_ip = nas_ip or loc_q.get("nasIp")
+        except requests.RequestException as e:
+            log.warning("本地入口请求失败: %s", e)
 
     try:
         resolved = resolve_redirect(sess, server, gw_params or {}, timeout)
