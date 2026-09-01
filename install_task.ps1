@@ -92,7 +92,7 @@ if (Test-Path -LiteralPath $resetScript) {
     try {
         Register-ScheduledTask -TaskName 'CampusResetDNS' -Action $resetAction `
             -Trigger $resetTrigger -Settings $settings -Principal $resetPrincipal `
-            -Description '开机登录时将所有在线网卡 DNS 重置为自动(DHCP)并刷新缓存' -Force | Out-Null
+            -Description '开机登录时将所有在线网卡 DNS 重置为自动(DHCP)并强制重新获取 DHCP 地址' -Force | Out-Null
         Write-Host "[OK] 计划任务 CampusResetDNS 注册成功（登录后 5 秒执行，先于登录看护）" -ForegroundColor Green
     } catch {
         Write-Warning "CampusResetDNS 注册失败：$($_.Exception.Message)"

@@ -41,10 +41,11 @@ python watch.py
 # 5. 断网重连演练：注销当前会话并在 5 秒后自动重新登录（需交互输入 YES 确认）
 python watch.py test
 
-# 6. 注册计划任务（DNS 重置任务需管理员，会弹 UAC 确认一次）
+# 6. 注册计划任务（DNS/DHCP 重置任务需管理员，会弹 UAC 确认一次）
 powershell -ExecutionPolicy Bypass -File install_task.ps1
-#    CampusResetDNS：登录后 5 秒，管理员权限将所有在线网卡 DNS 重置为 DHCP 自动并刷新缓存
-#    （用于清除 Clash 等工具残留的 DNS 劫持，需早于登录看护执行）
+#    CampusResetDNS：登录后 5 秒，管理员权限将所有在线网卡 DNS 重置为 DHCP 自动、
+#    强制 release+renew 重新获取 DHCP 地址（清除 Clash 残留 DNS 劫持与失效旧租约，
+#    避免开机后等待服务器慢速 DHCPNACK 导致的约 12 分钟断网），需早于登录看护执行
 #    CampusAutoLogin：登录后 30 秒 / 网络连接事件后 10 秒，静默运行看护循环
 #    立即启动一次：  powershell -File install_task.ps1 -StartNow
 #    卸载全部任务：  powershell -File install_task.ps1 -Remove
@@ -53,6 +54,12 @@ powershell -ExecutionPolicy Bypass -File install_task.ps1
 日志位于 `logs\watch_YYYYMMDD.log` 与 `logs\reset_dns.log`；离线事件的网关重定向链会完整记录，便于后续排查认证流程变化。
 
 ## 修改与问题解决日志
+
+### 2026-09-01 16:55
+- **修改/问题**：开机后网卡沿用上午的失效旧租约（`100.67.36.170`），DHCP 服务器迟迟不回 DHCPNACK（事件日志 1002 证实），导致开机后约 12 分钟内一切流量（含 ping Portal 纯 IP）超时
+- **涉及文件**：`reset_dns.ps1`、`install_task.ps1`、`README.md`
+- **解决方案**：`reset_dns.ps1` 在 DNS 重置基础上增加 DHCP 强制重新获取（对 DHCP 启用的在线网卡执行 `ipconfig /release` + `/renew`），新增网卡就绪等待（最多 30 秒）与获取后 IP 日志；实测 release+renew 秒级拿到新 IP（`100.67.169.167`），IP 变化导致会话失效后看护脚本在下一轮询内自动重登（16:51:17 登录成功）；`install_task.ps1` 中任务描述同步更新
+- **影响范围**：开机网络初始化时序升级为"DNS 重置 → DHCP 强制重新获取 → 校园网自动登录"，开机到可用时间从约 13 分钟压缩至 1 分钟内；代价为每次登录 Windows 时网络闪断数秒
 
 ### 2026-09-01 12:52
 - **修改/问题**：从手机热点切回校园网后，未认证状态下校园 DNS 不解析外部域名，脚本的域名探测被误判为 `down` 而跳过登录，导致"只有手动在浏览器打开登录页后脚本才生效"
