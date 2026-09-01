@@ -9,12 +9,14 @@ $TaskName = 'CampusAutoLogin'
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if ($Remove) {
-    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($existing) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Host "[OK] 任务 $TaskName 已删除"
-    } else {
-        Write-Host "任务 $TaskName 不存在"
+    foreach ($name in @($TaskName, 'CampusResetDNS')) {
+        $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if ($existing) {
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+            Write-Host "[OK] 任务 $name 已删除"
+        } else {
+            Write-Host "任务 $name 不存在"
+        }
     }
     return
 }
@@ -71,15 +73,36 @@ try {
     Register-ScheduledTask -TaskName $TaskName -Action $action `
         -Trigger @($logonTrigger, $eventTrigger) `
         -Settings $settings -Principal $principal `
-        -Description '校园网自动登录看护（锐杰 SAM+ Portal / CAS-SSO）' -Force | Out-Null
+        -Description '校园网自动登录看护（锐捷 SAM+ Portal / CAS-SSO）' -Force | Out-Null
     Write-Host "[OK] 计划任务 $TaskName 注册成功" -ForegroundColor Green
     Write-Host "  - 触发：用户登录 30 秒后 / 网络连接事件(10000)后 10 秒"
-    Write-Host "  - 查看: Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo"
-    Write-Host "  - 删除: powershell -File install_task.ps1 -Remove"
 } catch {
     Write-Warning "注册失败：$($_.Exception.Message)"
     Write-Warning "请尝试用管理员身份运行 PowerShell 后重试。"
 }
+
+$resetScript = Join-Path $ProjectDir 'reset_dns.ps1'
+if (Test-Path -LiteralPath $resetScript) {
+    $resetAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $resetScript + '"') `
+        -WorkingDirectory $ProjectDir
+    $resetTrigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $resetTrigger.Delay = 'PT5S'
+    $resetPrincipal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
+    try {
+        Register-ScheduledTask -TaskName 'CampusResetDNS' -Action $resetAction `
+            -Trigger $resetTrigger -Settings $settings -Principal $resetPrincipal `
+            -Description '开机登录时将所有在线网卡 DNS 重置为自动(DHCP)并刷新缓存' -Force | Out-Null
+        Write-Host "[OK] 计划任务 CampusResetDNS 注册成功（登录后 5 秒执行，先于登录看护）" -ForegroundColor Green
+    } catch {
+        Write-Warning "CampusResetDNS 注册失败：$($_.Exception.Message)"
+    }
+} else {
+    Write-Warning "未找到 reset_dns.ps1，已跳过 DNS 重置任务注册"
+}
+
+Write-Host "  - 查看: Get-ScheduledTask CampusAutoLogin, CampusResetDNS"
+Write-Host "  - 删除: powershell -File install_task.ps1 -Remove"
 
 if ($StartNow) {
     Start-ScheduledTask -TaskName $TaskName

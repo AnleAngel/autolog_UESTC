@@ -12,12 +12,13 @@
 G:\autologin_UESTC\
 ├─ login.py               # 登录核心：离线探测/重定向捕获/CAS 流程/AES 加密/在线确认
 ├─ watch.py               # 常驻看护主程序：循环探测、失败退避、状态持久化、CLI 模式
-├─ install_task.ps1       # Windows 计划任务安装脚本（开机自启 + 网络事件触发）
+├─ install_task.ps1       # Windows 计划任务安装脚本（DNS 重置 + 开机自启 + 网络事件触发）
+├─ reset_dns.ps1          # 开机 DNS 重置：全部在线网卡恢复 DHCP 自动 DNS 并刷新缓存
 ├─ config.example.ini     # 配置模板（复制为 config.ini 后填写账号密码）
 ├─ config.ini             # 实际配置（含密码，已被 .gitignore 排除）
 ├─ state.json             # 运行状态（最近登录时间/sessionId，供断网演练用）
 ├─ .gitignore
-└─ logs\                  # 运行日志（按天分文件，UTF-8）
+└─ logs\                  # 运行日志（watch_YYYYMMDD.log、reset_dns.log，UTF-8）
 ```
 
 ## 使用方法
@@ -40,15 +41,30 @@ python watch.py
 # 5. 断网重连演练：注销当前会话并在 5 秒后自动重新登录（需交互输入 YES 确认）
 python watch.py test
 
-# 6. 注册开机自启 + 网络重连事件触发的计划任务（建议管理员 PowerShell 运行）
+# 6. 注册计划任务（DNS 重置任务需管理员，会弹 UAC 确认一次）
 powershell -ExecutionPolicy Bypass -File install_task.ps1
+#    CampusResetDNS：登录后 5 秒，管理员权限将所有在线网卡 DNS 重置为 DHCP 自动并刷新缓存
+#    （用于清除 Clash 等工具残留的 DNS 劫持，需早于登录看护执行）
+#    CampusAutoLogin：登录后 30 秒 / 网络连接事件后 10 秒，静默运行看护循环
 #    立即启动一次：  powershell -File install_task.ps1 -StartNow
-#    卸载任务：      powershell -File install_task.ps1 -Remove
+#    卸载全部任务：  powershell -File install_task.ps1 -Remove
 ```
 
-日志位于 `logs\watch_YYYYMMDD.log`；离线事件的网关重定向链会完整记录，便于后续排查认证流程变化。
+日志位于 `logs\watch_YYYYMMDD.log` 与 `logs\reset_dns.log`；离线事件的网关重定向链会完整记录，便于后续排查认证流程变化。
 
 ## 修改与问题解决日志
+
+### 2026-09-01 12:30
+- **修改/问题**：用户经常使用 Clash 更改 DNS，开机时若残留 DNS 劫持会导致"链路级断网"（DNS 解析失败），需要在开机联网前先恢复默认 DNS
+- **涉及文件**：`reset_dns.ps1`（新增）、`install_task.ps1`、`README.md`
+- **解决方案**：新增 `reset_dns.ps1`：将所有在线网卡 DNS 重置为 DHCP 自动（`Set-DnsClientServerAddress -ResetServerAddresses`）并刷新 DNS 缓存，写日志到 `logs/reset_dns.log`，非管理员运行时自动跳过；`install_task.ps1` 新增 `CampusResetDNS` 计划任务（登录后 5 秒、`RunLevel Highest`，早于登录看护的 30 秒），`-Remove` 同时清理两个任务；高权限任务需 UAC 提权注册一次，已实际完成并手动触发验证（LastTaskResult=0，以太网/WLAN 均恢复 DHCP DNS）
+- **影响范围**：开机网络初始化流程（DNS 重置 → 校园网自动登录）；不影响 Clash 运行期正常使用（其启动后可照常接管 DNS）
+
+### 2026-09-01 12:35
+- **修改/问题**：真实运行中出现"链路级断网"（DNS 解析失败 + Portal 纯 IP 连接超时），脚本未捕获 `ConnectTimeout` 异常导致 traceback 崩溃，且在链路不通时仍盲目执行 16 秒超时的登录流程
+- **涉及文件**：`login.py`、`watch.py`、`README.md`
+- **解决方案**：新增三态网络探测 `probe_network`（`online`/`captive`/`down`）：DNS 失败或连接失败判定为 `down`，204 为在线，302 为待认证；`do_login` 全程异常兜底（`RequestException`/`LoginError` 转友好消息）；看护循环遇 `down` 状态不尝试登录、不计入失败退避，仅等待下轮探测；`check` 命令输出三态标签
+- **影响范围**：网络状态分类与登录入口；验证：真实探测 `online`、模拟 DNS 故障 `down`、`do_login` 在 `down` 下返回友好错误而非崩溃
 
 ### 2026-08-31 13:45
 - **修改/问题**：`install_task.ps1` 用 schtasks + XML 注册计划任务报"指定的队列无效"（schtasks 对事件触发器 Subscription 元素的已知缺陷）
