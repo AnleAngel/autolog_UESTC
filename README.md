@@ -55,6 +55,12 @@ powershell -ExecutionPolicy Bypass -File install_task.ps1
 
 ## 修改与问题解决日志
 
+### 2026-09-04 22:20
+- **修改/问题**：开机后校园网 BRAS 侧残留的陈旧在线会话（按 MAC/IP 绑定）导致约 10 分钟流量黑洞，DHCP 层面的 release+renew 无法清除服务端会话状态
+- **涉及文件**：`watch.py`、`reset_dns.ps1`、`README.md`
+- **解决方案**：双层自愈机制——① 看护循环检测到 `down` 时用 `state.json` 保存的旧 sessionId 主动调用注销 API 清理陈旧会话（每个 sessionId 仅尝试一次）；② 连续 3 次 `down` 后通过 `schtasks /Run` 触发提权任务 `CampusResetDNS` 执行网卡弹跳自修复（release → disable → enable → renew，复刻实测中"链路弹跳+新 IP 即恢复"的路径），该任务同时服务开机初始化与按需修复，无需新增 UAC 授权；实测弹跳后秒级拿到新 IP、看护循环恢复正常
+- **影响范围**：开机黑洞期从约 10-12 分钟压缩至最迟 3 个探测周期（约 6-7 分钟）内触发修复，修复后 1-2 分钟内恢复在线；`reset_dns.log` 新增弹跳与 IP 记录
+
 ### 2026-09-01 16:55
 - **修改/问题**：开机后网卡沿用上午的失效旧租约（`100.67.36.170`），DHCP 服务器迟迟不回 DHCPNACK（事件日志 1002 证实），导致开机后约 12 分钟内一切流量（含 ping Portal 纯 IP）超时
 - **涉及文件**：`reset_dns.ps1`、`install_task.ps1`、`README.md`

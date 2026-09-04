@@ -6,6 +6,7 @@ import configparser
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -16,6 +17,10 @@ import login
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 STATE_FILE = BASE_DIR / "state.json"
+
+REPAIR_TASK = "CampusResetDNS"
+REPAIR_AFTER_DOWN = 3
+_LOGGED_OUT: set[str] = set()
 
 DEFAULTS = {
     "server": "110.184.24.61",
@@ -96,6 +101,27 @@ def run_login_once(cfg: dict[str, Any]) -> tuple[bool, str]:
     return ok, msg
 
 
+def maybe_logout_stale(cfg: dict[str, Any]) -> None:
+    fid = load_state().get("session_id")
+    if not fid or fid in _LOGGED_OUT:
+        return
+    _LOGGED_OUT.add(fid)
+    ok, msg = login.do_logout(cfg, fid)
+    logger.info("陈旧会话清理(sessionId=%s): %s", fid, msg)
+
+
+def run_network_repair(cfg: dict[str, Any]) -> None:
+    logger.info("触发网络自修复任务 %s（网卡弹跳 + DHCP 重新获取，需管理员授权）", REPAIR_TASK)
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Run", "/TN", REPAIR_TASK],
+            capture_output=True, text=True, timeout=30,
+        )
+        logger.info("自修复任务启动: exit=%s %s", r.returncode, (r.stdout or r.stderr).strip()[:120])
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("自修复任务启动失败: %s", e)
+
+
 def cmd_check(cfg: dict[str, Any]) -> int:
     sess = login.new_session()
     state, _ = login.probe_network(sess, cfg["probe_url"], cfg["server"], float(cfg["timeout"]))
@@ -132,24 +158,33 @@ def cmd_loop(cfg: dict[str, Any]) -> int:
     interval = float(cfg["interval"])
     backoff_max = float(cfg["backoff_max"])
     fail_count = 0
+    down_count = 0
     logger.info("看护循环启动：server=%s interval=%ss", cfg["server"], interval)
     while True:
         try:
             sess = login.new_session()
             state, _ = login.probe_network(sess, cfg["probe_url"], cfg["server"], float(cfg["timeout"]))
             if state == "online":
-                if fail_count:
+                if fail_count or down_count:
                     logger.info("网络已恢复")
                 fail_count = 0
+                down_count = 0
             elif state == "down":
-                logger.warning("网络链路不可达（DNS/连接失败），等待下一轮探测")
-                fail_count = 0
+                down_count += 1
+                logger.warning("网络链路不可达（第 %d 次），等待下一轮探测", down_count)
+                maybe_logout_stale(cfg)
+                if down_count >= REPAIR_AFTER_DOWN:
+                    run_network_repair(cfg)
+                    down_count = 0
+                    time.sleep(45)
+                    continue
             else:
                 logger.info("检测到强制门户（离线），尝试登录...")
                 ok, msg = run_login_once(cfg)
                 logger.info("%s", msg)
                 if ok:
                     fail_count = 0
+                    down_count = 0
                 else:
                     fail_count += 1
                     sleep_for = min(30 * (2 ** (fail_count - 1)), backoff_max)

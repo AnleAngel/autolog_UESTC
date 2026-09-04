@@ -12,7 +12,7 @@ function Write-Log {
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Log '[WARN] 未以管理员身份运行，DNS/DHCP 重置已跳过'
+    Write-Log '[WARN] 未以管理员身份运行，DNS/DHCP/网卡重置已跳过'
     exit 1
 }
 
@@ -44,10 +44,14 @@ foreach ($a in $upAdapters) {
     if ($ipif -and $ipif.Dhcp -eq 'Enabled') {
         try {
             $null = ipconfig /release "$($a.Name)" 2>$null
+            $null = netsh interface set interface name="$($a.Name)" admin=disable 2>$null
+            Start-Sleep -Seconds 3
+            $null = netsh interface set interface name="$($a.Name)" admin=enable 2>$null
+            Start-Sleep -Seconds 2
             $null = ipconfig /renew "$($a.Name)" 2>$null
             $renewed += $a.Name
         } catch {
-            Write-Log ("[ERROR] DHCP 重新获取失败 {0}: {1}" -f $a.Name, $_.Exception.Message)
+            Write-Log ("[ERROR] DHCP/网卡重置失败 {0}: {1}" -f $a.Name, $_.Exception.Message)
         }
     }
 }
@@ -60,10 +64,11 @@ if ($dnsReset.Count -gt 0) {
     Write-Log '[OK] DNS 无需修改（所有在线网卡均为自动 DNS）'
 }
 if ($renewed.Count -gt 0) {
+    Start-Sleep -Seconds 5
     $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.PrefixOrigin -eq 'Dhcp' } |
         ForEach-Object { "{0}={1}" -f $_.InterfaceAlias, $_.IPAddress }
-    Write-Log ("[OK] DHCP 已强制重新获取: {0}; 当前 IP: {1}; DNS 缓存已刷新" -f ($renewed -join ', '), ($ips -join ', '))
+    Write-Log ("[OK] 网卡已弹跳并重新获取 DHCP: {0}; 当前 IP: {1}; DNS 缓存已刷新" -f ($renewed -join ', '), ($ips -join ', '))
 } else {
-    Write-Log '[OK] 无 DHCP 网卡需要重新获取; DNS 缓存已刷新'
+    Write-Log '[OK] 无 DHCP 网卡需要重置; DNS 缓存已刷新'
 }
